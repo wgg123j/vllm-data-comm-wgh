@@ -9,6 +9,7 @@ import uvloop
 
 import vllm
 import vllm.envs as envs
+from vllm.config.lwd.logging import log_lwd_frontend_config
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.launchers.cli_args import (
@@ -18,6 +19,7 @@ from vllm.entrypoints.launchers.cli_args import (
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
+from vllm.lwd_logger import lwd_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -141,6 +143,8 @@ class ServeSubcommand(CLISubcommand):
                 args.api_server_count,
             )
             args.api_server_count = 1
+
+        log_lwd_frontend_config(lwd_logger, args)
 
         if is_multi_port:
             run_dp_supervisor(args)
