@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 import json
 import logging
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 from lwd_config_under_test import LwdAPIConfig, LwdConfig, log_lwd_config
+from lwd_config_under_test.logging import log_lwd_frontend_config
 from sample_topologies import topology_payload
 
 
@@ -19,7 +22,6 @@ def test_log_contains_complete_selected_config_without_reading_key_contents(
     raw = topology_payload("s3_cloud_share_1dp.yaml")
     raw["feature_ctrl"] = {"enable_early_recv": True, "enable_scramble": True}
     path = tmp_path / "topology.yaml"
-    path.write_text(yaml.safe_dump(raw))
     key = tmp_path / "tenant.key"
     key.write_text("local-key-content-must-not-be-logged")
     coordination: dict[str, Any] = {"enabled": True}
@@ -32,19 +34,30 @@ def test_log_contains_complete_selected_config_without_reading_key_contents(
         )
     else:
         coordination.update(listen_host="0.0.0.0", listen_port=9133)
+    for edge in raw["edges"]:
+        edge["coordination"] = {
+            "enabled": True,
+            "control_url": "http://10.1.0.1:9133/v1/chat/completions",
+            "tenant_key_file": str(key),
+        }
+    raw["clouds"][0]["coordination"] = {"enabled": True}
+    instances = raw["edges"] if role == "edge" else raw["clouds"]
+    next(instance for instance in instances if instance["id"] == identity)[
+        "coordination"
+    ] = coordination
+    path.write_text(yaml.safe_dump(raw))
     config = LwdConfig.from_dict(
         {
             "path": str(path),
             "role": role,
             "instance_id": identity,
-            "coordination": coordination,
         }
     )
     path.unlink()
     with caplog.at_level(logging.INFO):
         log_lwd_config(logging.getLogger("test.lwd-config"), config)
     line = caplog.records[-1].getMessage()
-    assert line.startswith("[LWD][config] resolved=")
+    assert line.startswith("[config] resolved=")
     result = json.loads(line.split("resolved=", 1)[1])
     assert result["metadata_only"] is True
     actual = result["lwd_config"]
@@ -55,9 +68,14 @@ def test_log_contains_complete_selected_config_without_reading_key_contents(
     )
     topology = actual["topology"]
     assert topology.pop("digest") == config.topology.digest
-    for edge in raw["edges"]:
-        for dp in edge["dp"]:
-            dp["ctrl_port"] = None  # Parsed edge DPs retain this unset default.
+    for group in ("edges", "clouds"):
+        for instance in raw[group]:
+            parsed_instance = config.topology.instance(
+                "edge" if group == "edges" else "cloud", instance["id"]
+            )
+            instance["coordination"] = asdict(parsed_instance.coordination)
+            for dp in instance["dp"]:
+                dp.setdefault("ctrl_port", None)
     assert topology == raw  # Includes all peers, ranks, ports, features and links.
     parsed = actual["coordination"]
     assert all(parsed[name] == value for name, value in coordination.items())
@@ -105,3 +123,33 @@ def test_log_includes_multi_instance_api_endpoint(
     assert result["lwd_config"]["api"][field] == "10.0.0.1:25100"
     assert result["lwd_config"]["coordination"] is None
     assert [link["dp_idx"] for link in result["connections"]] == [0, 1]
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_frontend_log_preserves_effective_count(
+    caplog: pytest.LogCaptureFixture, count: int
+) -> None:
+    args = argparse.Namespace(
+        additional_config={"lwd_config": {"role": "edge", "instance_id": 1}},
+        api_server_count=count,
+        api_server_attach="10.0.0.1:25100",
+    )
+    with caplog.at_level(logging.INFO):
+        log_lwd_frontend_config(logging.getLogger("test.lwd-config"), args)
+    snapshot = json.loads(caplog.records[-1].getMessage().split("frontend=", 1)[1])
+    assert snapshot == {
+        "role": "edge",
+        "instance_id": 1,
+        "api_server_count": count,
+        "api_server_attach": "10.0.0.1:25100",
+        "api_server_rpc_port": None,
+    }
+
+
+def test_frontend_log_skips_non_lwd_startup(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO):
+        log_lwd_frontend_config(
+            logging.getLogger("test.lwd-config"),
+            argparse.Namespace(additional_config={}),
+        )
+    assert not caplog.records
