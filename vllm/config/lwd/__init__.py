@@ -33,7 +33,7 @@ def resolve_lwd_config(
     if "lwd_coordination" in additional_config:
         raise ValueError(
             "[LWD] Top-level lwd_coordination is retired; "
-            "move it into lwd_config.coordination"
+            "it is now generated inside the topology yaml by gen_lwd_topology.py"
         )
     lwd = (
         LwdConfig.from_dict(additional_config["lwd_config"], api=api)

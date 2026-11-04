@@ -12,10 +12,33 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from lwd_config_under_test import LwdAPIConfig, resolve_lwd_config
+import yaml
+from lwd_config_under_test import (
+    LwdAPIConfig,
+    LwdCoordinationConfig,
+    resolve_lwd_config,
+)
+from sample_topologies import topology_payload
 
 FIXTURE_NAME = "s3_cloud_share_2dp.yaml"
 StartupEntry = tuple[Callable[[], None], SimpleNamespace, Mock]
+
+
+@pytest.fixture
+def cloud_share_yaml(tmp_path: Path) -> Path:
+    raw = topology_payload(FIXTURE_NAME)
+    for edge in raw["edges"]:
+        edge["coordination"] = {
+            "enabled": True,
+            "control_url": "http://127.0.0.1:9133/v1/chat/completions",
+            "tenant_key_file": str(tmp_path / "does-not-exist"),
+            "consumer_id": f"enterprise-a-edge{edge['id']}",
+            "connect_timeout": 5.0,
+        }
+    raw["clouds"][0]["coordination"] = {"enabled": True, "listen_port": 9133}
+    path = tmp_path / "cloud-share.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return path
 
 
 @pytest.fixture(
@@ -32,7 +55,7 @@ def startup_entry(
     source = Path(__file__).resolve().parents[3] / "vllm" / path
     cls = next(
         node
-        for node in ast.parse(source.read_text()).body
+        for node in ast.parse(source.read_text(encoding="utf-8")).body
         if isinstance(node, ast.ClassDef) and node.name == class_name
     )
     method = next(
@@ -48,6 +71,7 @@ def startup_entry(
     scope = {
         "time": time,
         "logger": Mock(),
+        "lwd_logger": Mock(),
         "log_lwd_config": Mock(),
         "resolve_lwd_config": resolver,
         "LwdAPIConfig": LwdAPIConfig,
@@ -59,8 +83,15 @@ def startup_entry(
     )
 
     def run() -> None:
+        scope["log_lwd_config"].reset_mock()
         with pytest.raises(StopIteration):
             scope[method_name](args)
+        if class_name == "VllmConfig" and args.lwd_config is not None:
+            scope["log_lwd_config"].assert_called_once_with(
+                scope["lwd_logger"], args.lwd_config
+            )
+        else:
+            scope["log_lwd_config"].assert_not_called()
 
     return run, args, resolver
 
@@ -122,22 +153,14 @@ def test_api_attachment_without_lwd_still_fails(startup_entry: StartupEntry) -> 
 
 
 def test_snapshot_survives_handoff_without_yaml_or_key_access(
-    tmp_path: Path, lwd_yaml_dir: Path
+    cloud_share_yaml: Path,
 ) -> None:
-    path = tmp_path / "topology.yaml"
-    path.write_bytes((lwd_yaml_dir / FIXTURE_NAME).read_bytes())
+    path = cloud_share_yaml
     raw = {
         "lwd_config": {
             "path": str(path),
             "role": "edge",
             "instance_id": 1,
-            "coordination": {
-                "enabled": True,
-                "control_url": "http://127.0.0.1:9133/v1/chat/completions",
-                "tenant_key_file": str(tmp_path / "does-not-exist"),
-                "consumer_id": "enterprise-a-edge1",
-                "connect_timeout": 5.0,
-            },
         },
     }
     original = copy.deepcopy(raw)
@@ -171,10 +194,10 @@ def test_absent_lwd_leaves_centralized_configuration_empty(raw: object) -> None:
     ],
 )
 def test_invalid_entry_fails_during_configuration(
-    change: dict, match: str, lwd_yaml_dir: Path
+    change: dict, match: str, cloud_share_yaml: Path
 ) -> None:
     entry = {
-        "path": str(lwd_yaml_dir / FIXTURE_NAME),
+        "path": str(cloud_share_yaml),
         "role": "edge",
         "instance_id": 0,
         **change,
@@ -198,16 +221,32 @@ def test_invalid_entry_fails_during_configuration(
     ],
 )
 def test_invalid_coordination_is_not_silently_forwarded(
-    coordination: object, lwd_yaml_dir: Path
+    coordination: object, cloud_share_yaml: Path
 ) -> None:
+    raw = yaml.safe_load(cloud_share_yaml.read_text(encoding="utf-8"))
+    raw["edges"][0]["coordination"] = coordination
+    cloud_share_yaml.write_text(yaml.safe_dump(raw), encoding="utf-8")
     with pytest.raises(ValueError):
         resolve_lwd_config(
             {
                 "lwd_config": {
-                    "path": str(lwd_yaml_dir / FIXTURE_NAME),
+                    "path": str(cloud_share_yaml),
                     "role": "edge",
                     "instance_id": 0,
-                    "coordination": coordination,
+                }
+            }
+        )
+
+
+def test_entry_coordination_is_retired(lwd_yaml_dir: Path) -> None:
+    with pytest.raises(ValueError, match="coordination is retired from lwd_config"):
+        resolve_lwd_config(
+            {
+                "lwd_config": {
+                    "path": str(lwd_yaml_dir / "s1_single_instance_1dp.yaml"),
+                    "role": "edge",
+                    "instance_id": 0,
+                    "coordination": {"enabled": False},
                 }
             }
         )
@@ -226,13 +265,13 @@ def test_legacy_coordination_cannot_shadow_nested_configuration(
             "instance_id": 0,
             "coordination": {"enabled": False},
         }
-    with pytest.raises(ValueError, match="move it into lwd_config.coordination"):
+    with pytest.raises(ValueError, match="Top-level lwd_coordination is retired"):
         resolve_lwd_config(raw)
 
 
 @pytest.mark.parametrize("cloud_id,name", [(0, None), (1, None), (1, "custom-cloud")])
-def test_cloud_coordination_name_preserves_override_or_defaults_to_selected_cloud(
-    cloud_id: int, name: str | None, lwd_yaml_dir: Path
+def test_coordination_config_name_preserves_override_or_defaults_to_cloud_id(
+    cloud_id: int, name: str | None
 ) -> None:
     supplied = {
         "enabled": True,
@@ -240,14 +279,8 @@ def test_cloud_coordination_name_preserves_override_or_defaults_to_selected_clou
         **({"instance_id": name} if name else {}),
     }
     original = supplied.copy()
-    entry = {
-        "path": str(lwd_yaml_dir / "s2_edge_share_1dp.yaml"),
-        "role": "cloud",
-        "instance_id": cloud_id,
-        "coordination": supplied,
-    }
-    selected = resolve_lwd_config({"lwd_config": entry})
-    assert selected.coordination.instance_id == (name or f"cloud-{cloud_id}")
+    selected = LwdCoordinationConfig.from_dict(supplied, cloud_id=cloud_id)
+    assert selected.instance_id == (name or f"cloud-{cloud_id}")
     assert supplied == original
 
 
@@ -255,7 +288,7 @@ def test_absent_coordination_stays_disabled(lwd_yaml_dir: Path) -> None:
     selected = resolve_lwd_config(
         {
             "lwd_config": {
-                "path": str(lwd_yaml_dir / FIXTURE_NAME),
+                "path": str(lwd_yaml_dir / "s1_single_instance_1dp.yaml"),
                 "role": "cloud",
                 "instance_id": 0,
             }
@@ -279,7 +312,6 @@ def test_api_cli_metadata_survives_snapshot_handoff(
             "path": str(path),
             "role": "edge",
             "instance_id": identity,
-            "coordination": {"enabled": False},
         }
     }
     # Capturing CLI options does not read YAML; snapshot construction owns that read.
@@ -291,7 +323,7 @@ def test_api_cli_metadata_survives_snapshot_handoff(
     # Only round-trip our own objects, never externally supplied pickle data.
     received_entry = pickle.loads(pickle.dumps(entry))
     assert received_entry.api == api
-    assert received_entry.coordination.enabled is False
+    assert received_entry.coordination is None
     assert [c.dp_idx for c in received_entry.connections] == [0, 1]
     assert received_entry.instance_id == identity
     assert args.additional_config == original
