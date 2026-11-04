@@ -133,6 +133,10 @@ class PassConfig:
     """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
+    enable_sp: bool = None  # type: ignore[assignment]
+    """Enable sequence parallelism when supported by the model and device."""
+    fuse_gemm_comms: bool = None  # type: ignore[assignment]
+    """Enable asynchronous tensor-parallel communication fusion."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
