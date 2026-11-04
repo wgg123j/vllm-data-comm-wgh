@@ -166,7 +166,8 @@ class LwdBaseScheduler(AsyncScheduler):
             self.running, self.waiting, self.kv_holding_waiting = saved
             self.deferred_waiting = saved_deferred
             self.running += post[0]
-            self.waiting.extend(rest)
+            for request in rest:
+                self.waiting.add_request(request)
             for request in reversed(preempted):
                 self.waiting.prepend_request(request)
             self.kv_holding_waiting.prepend_requests(reversed(list(post[2])))
