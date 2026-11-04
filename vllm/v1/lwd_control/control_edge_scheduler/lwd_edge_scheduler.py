@@ -520,7 +520,7 @@ class LwdEdgeScheduler(LwdBaseScheduler):
             LwdPrefillCandidate(
                 r.request_id, r.num_prompt_tokens, r.num_computed_tokens
             )
-            for r in [*self.skipped_waiting, *self.waiting]
+            for r in [*self.kv_holding_waiting, *self.waiting]
             if self._lwd_dp_of(r.request_id) == dp_idx
         ]
         req_ids, expected = lwd_pick_prefill_batch(

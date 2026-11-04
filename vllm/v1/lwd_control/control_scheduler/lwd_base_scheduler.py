@@ -117,15 +117,19 @@ class LwdBaseScheduler(AsyncScheduler):
         picked = {self.requests[req_id] for req_id in req_ids}
         from_running = [req for req in self.running if req in picked]
         from_waiting = [req for req in self.waiting if req in picked]
-        from_skipped = [req for req in self.skipped_waiting if req in picked]
+        from_kv_holding = [req for req in self.kv_holding_waiting if req in picked]
+        from_deferred = self.deferred_waiting & picked
         self.running = [req for req in self.running if req not in picked]
         self.waiting.remove_requests(from_waiting)
-        self.skipped_waiting.remove_requests(from_skipped)
-        saved = (self.running, self.waiting, self.skipped_waiting)
+        self.kv_holding_waiting.remove_requests(from_kv_holding)
+        self.deferred_waiting.difference_update(picked)
+        saved = (self.running, self.waiting, self.kv_holding_waiting)
+        saved_deferred = self.deferred_waiting
         # Put the visible set in place and schedule it alone
         self.running = from_running
         self.waiting = self._lwd_new_queue(from_waiting)
-        self.skipped_waiting = self._lwd_new_queue(from_skipped)
+        self.kv_holding_waiting = self._lwd_new_queue(from_kv_holding)
+        self.deferred_waiting = from_deferred
         saved_cap = self.max_num_running_reqs
         self.max_num_running_reqs = max(0, saved_cap - len(saved[0]))
         saved_budget = self.max_num_scheduled_tokens
@@ -147,7 +151,8 @@ class LwdBaseScheduler(AsyncScheduler):
             self.max_num_running_reqs = saved_cap
             self.max_num_scheduled_tokens = saved_budget
             sched_cfg.long_prefill_token_threshold = saved_threshold
-            post = (self.running, self.waiting, self.skipped_waiting)
+            post = (self.running, self.waiting, self.kv_holding_waiting)
+            post_deferred = self.deferred_waiting
             preempted_req_ids = (
                 (out.preempted_req_ids or set()) if out is not None else set()
             )
@@ -158,12 +163,14 @@ class LwdBaseScheduler(AsyncScheduler):
                     preempted.append(request)
                 else:
                     rest.append(request)
-            self.running, self.waiting, self.skipped_waiting = saved
+            self.running, self.waiting, self.kv_holding_waiting = saved
+            self.deferred_waiting = saved_deferred
             self.running += post[0]
             self.waiting.extend(rest)
             for request in reversed(preempted):
                 self.waiting.prepend_request(request)
-            self.skipped_waiting.prepend_requests(post[2])
+            self.kv_holding_waiting.prepend_requests(reversed(list(post[2])))
+            self.deferred_waiting.update(post_deferred)
         return out
 
     def _free_request(
