@@ -119,6 +119,7 @@ class LwdCloudScheduler(LwdBaseScheduler):
                 self.waiting,
                 self.kv_holding_waiting,
             )
+            if request not in self.deferred_waiting
         ]
 
     def _lwd_compute_decode_consumption(self, decode_ids: list[str]) -> int:
@@ -240,7 +241,11 @@ class LwdCloudScheduler(LwdBaseScheduler):
             if room <= 0:
                 break
             request_id = request.request_id
-            if request_id in self._lwd_dropped or request.is_finished():
+            if (
+                request_id in self._lwd_dropped
+                or request.is_finished()
+                or request in self.deferred_waiting
+            ):
                 continue
             start = request.num_computed_tokens
             if prefix_enabled:
