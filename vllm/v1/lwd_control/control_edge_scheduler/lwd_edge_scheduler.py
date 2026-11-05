@@ -521,11 +521,6 @@ class LwdEdgeScheduler(LwdBaseScheduler):
                 r.request_id, r.num_prompt_tokens, r.num_computed_tokens
             )
             for r in [*self.kv_holding_waiting, *self.waiting]
-            # The native scheduler records blocked requests in both a
-            # waiting queue and deferred_waiting.  They must not be offered
-            # to the LWD picker: selecting one causes the isolated native
-            # schedule to skip it again, which can starve later requests.
-            if r not in self.deferred_waiting
             if self._lwd_dp_of(r.request_id) == dp_idx
         ]
         req_ids, expected = lwd_pick_prefill_batch(
